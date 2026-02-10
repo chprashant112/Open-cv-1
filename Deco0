@@ -1,0 +1,105 @@
+import cv2
+import numpy as np
+import os
+
+# =========================
+# CONFIG
+# =========================
+DATA_DIR = r"C:\Users\c.prashant\Desktop\opencv_images\deco_cam0"
+IMG_EXT = [".jpg", ".png", ".jpeg"]
+
+COLOR_CLASS = 0
+DECO_CLASS = 1
+
+# =========================
+# UTILS
+# =========================
+def load_yolo_labels(label_path, img_w, img_h):
+    boxes = []
+    with open(label_path, "r") as f:
+        for line in f:
+            cls, xc, yc, w, h = map(float, line.split())
+            x1 = int((xc - w/2) * img_w)
+            y1 = int((yc - h/2) * img_h)
+            x2 = int((xc + w/2) * img_w)
+            y2 = int((yc + h/2) * img_h)
+            boxes.append((int(cls), x1, y1, x2, y2))
+    return boxes
+
+def create_mask(shape, box):
+    mask = np.zeros(shape[:2], dtype=np.uint8)
+    _, x1, y1, x2, y2 = box
+    mask[y1:y2, x1:x2] = 255
+    return mask
+
+def extract_lab_color(img, mask):
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    pixels = lab[mask > 0]
+    if len(pixels) == 0:
+        return None
+    return np.median(pixels, axis=0)
+
+# =========================
+# MAIN LOOP
+# =========================
+for file in os.listdir(DATA_DIR):
+    if not any(file.lower().endswith(ext) for ext in IMG_EXT):
+        continue
+
+    img_path = os.path.join(DATA_DIR, file)
+    label_path = img_path.rsplit(".", 1)[0] + ".txt"
+
+    if not os.path.exists(label_path):
+        continue
+
+    img = cv2.imread(img_path)
+    h, w = img.shape[:2]
+
+    boxes = load_yolo_labels(label_path, w, h)
+
+    body_mask = np.zeros((h, w), dtype=np.uint8)
+    deco_mask = np.zeros((h, w), dtype=np.uint8)
+
+    vis = img.copy()
+
+    for box in boxes:
+        cls, x1, y1, x2, y2 = box
+
+        if cls == COLOR_CLASS:
+            body_mask = create_mask(img.shape, box)
+            cv2.rectangle(vis, (x1,y1), (x2,y2), (0,255,0), 2)
+            cv2.putText(vis, "BODY", (x1,y1-5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+
+        elif cls == DECO_CLASS:
+            deco_mask = create_mask(img.shape, box)
+            cv2.rectangle(vis, (x1,y1), (x2,y2), (0,0,255), 2)
+            cv2.putText(vis, "DECO", (x1,y1-5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+
+    body_color = extract_lab_color(img, body_mask)
+    deco_color = extract_lab_color(img, deco_mask)
+
+    if body_color is not None and deco_color is not None:
+        delta = body_color - deco_color
+        delta_e = np.sqrt((0.3*delta[0])**2 + delta[1]**2 + delta[2]**2)
+        text = f"Delta-E: {delta_e:.2f}"
+    else:
+        text = "Missing ROI"
+
+    # Overlay masks for visual check
+    mask_vis = img.copy()
+    mask_vis[body_mask > 0] = (0.7*mask_vis[body_mask > 0] + np.array([0,255,0])*0.3)
+    mask_vis[deco_mask > 0] = (0.7*mask_vis[deco_mask > 0] + np.array([0,0,255])*0.3)
+
+    cv2.putText(vis, text, (20,40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
+
+    combined = np.hstack([vis, mask_vis])
+
+    cv2.imshow("Dataset Verification (Left: Boxes | Right: Masks)", combined)
+    key = cv2.waitKey(0)
+    if key == 27:  # ESC
+        break
+
+cv2.destroyAllWindows()
