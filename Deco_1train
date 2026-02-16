@@ -1,0 +1,48 @@
+# ==================================================
+# ALL-IN-ONE TRAINING SCRIPT (JUST SET DATASET PATH)
+# ==================================================
+from ultralytics import YOLO
+import os
+
+# =========================
+# USER CONFIG (ONLY THIS)
+# =========================
+DATASET_PATH = r"D:\your_dataset_path_here"  
+# must contain data.yaml
+
+EPOCHS = 120
+IMG_SIZE = 640
+BATCH = 16
+DEVICE = 0   # 0 = GPU, "cpu" if no GPU
+
+# =========================
+# TRAINING
+# =========================
+def main():
+    data_yaml = os.path.join(DATASET_PATH, "data.yaml")
+
+    if not os.path.exists(data_yaml):
+        raise FileNotFoundError("data.yaml not found in dataset path")
+
+    print("Loading YOLOv8 base model...")
+    model = YOLO("yolov8n.pt")
+
+    print("Starting training...")
+    model.train(
+        data=data_yaml,
+        epochs=EPOCHS,
+        imgsz=IMG_SIZE,
+        batch=BATCH,
+        device=DEVICE,
+        workers=4,
+        name="color_inspection"
+    )
+
+    print("\n==============================")
+    print("TRAINING COMPLETE")
+    print("Model saved at:")
+    print("runs/detect/color_inspection/weights/best.pt")
+    print("==============================")
+
+if __name__ == "__main__":
+    main()
