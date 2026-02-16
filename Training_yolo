@@ -1,0 +1,63 @@
+# ======================================================
+# YOLO TRAINING PIPELINE FOR ROI / COLOR / DECO DETECTION
+# ======================================================
+
+from ultralytics import YOLO
+import os
+
+# ======================================================
+# USER CONFIG (ONLY CHANGE THIS)
+# ======================================================
+DATASET_PATH = r"ENTER_THE_LABELLED_DATASET_PATH_HERE"
+# example:
+# DATASET_PATH = r"D:\phone_back_dataset"
+
+# ======================================================
+# TRAINING CONFIG (DO NOT TOUCH INITIALLY)
+# ======================================================
+EPOCHS   = 120
+IMG_SIZE = 640
+BATCH    = 16
+DEVICE   = 0      # use "cpu" if no GPU
+WORKERS  = 4
+
+# ======================================================
+# TRAINING LOGIC
+# ======================================================
+def main():
+    data_yaml = os.path.join(DATASET_PATH, "data.yaml")
+
+    if not os.path.exists(data_yaml):
+        raise FileNotFoundError(
+            f"data.yaml not found in {DATASET_PATH}"
+        )
+
+    print("===================================")
+    print("Loading YOLOv8 base model")
+    print("===================================")
+    model = YOLO("yolov8n.pt")
+
+    print("===================================")
+    print("Starting Training")
+    print("===================================")
+
+    model.train(
+        data=data_yaml,
+        epochs=EPOCHS,
+        imgsz=IMG_SIZE,
+        batch=BATCH,
+        device=DEVICE,
+        workers=WORKERS,
+        name="phone_color_inspection",
+        project="runs/detect"
+    )
+
+    print("\n===================================")
+    print("TRAINING COMPLETE")
+    print("===================================")
+    print("Model saved at:")
+    print("runs/detect/phone_color_inspection/weights/best.pt")
+    print("===================================")
+
+if __name__ == "__main__":
+    main()
