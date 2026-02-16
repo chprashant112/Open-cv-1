@@ -1,0 +1,137 @@
+import sys, cv2, numpy as np, time
+from PyQt5 import QtWidgets, QtGui
+from ultralytics import YOLO
+
+# =========================
+# CONFIG
+# =========================
+DELTA_E_THRESHOLD = 8.0
+DISPLAY_W, DISPLAY_H = 960, 540
+
+STATE_IDLE   = "IDLE"
+STATE_READY  = "READY"
+STATE_INSPECT= "INSPECT"
+STATE_PASS   = "PASS"
+STATE_FAIL   = "FAIL"
+
+# =========================
+# COLOR LOGIC (unchanged)
+# =========================
+def preprocess(roi):
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv,(0,0,40),(180,255,255))
+    return cv2.morphologyEx(mask,cv2.MORPH_OPEN,np.ones((3,3),np.uint8))
+
+def extract_lab(img, box):
+    _,x1,y1,x2,y2 = box
+    roi = img[y1:y2, x1:x2]
+    if roi.size==0: return None
+    mask = preprocess(roi)
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+    px = lab[mask>0]
+    if len(px)<50: return None
+    return np.median(px,axis=0)
+
+def delta_e(a,b):
+    return np.linalg.norm(a-b)
+
+# =========================
+# SPEN GUI
+# =========================
+class SPEN(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("SPEN Color Inspection")
+        self.resize(1100,750)
+
+        self.view = QtWidgets.QLabel()
+        self.view.setFixedSize(DISPLAY_W,DISPLAY_H)
+
+        self.status = QtWidgets.QLabel("IDLE")
+        self.status.setAlignment(QtCore.Qt.AlignCenter)
+        self.status.setStyleSheet("font-size:36px;font-weight:bold")
+
+        self.btn_load = QtWidgets.QPushButton("Load Model")
+        self.btn_reset = QtWidgets.QPushButton("Reset")
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.view)
+        layout.addWidget(self.status)
+        layout.addWidget(self.btn_load)
+        layout.addWidget(self.btn_reset)
+
+        self.cap = cv2.VideoCapture(0)
+        self.timer = QtWidgets.QTimer()
+        self.timer.timeout.connect(self.loop)
+        self.timer.start(30)
+
+        self.btn_load.clicked.connect(self.load_model)
+        self.btn_reset.clicked.connect(self.reset)
+
+        self.model = None
+        self.state = STATE_IDLE
+        self.freeze_frame = None
+
+    # ---------------------
+    def load_model(self):
+        path,_ = QtWidgets.QFileDialog.getOpenFileName(self,"Load Model",".","*.pt")
+        if path:
+            self.model = YOLO(path)
+            self.state = STATE_READY
+
+    def trigger(self):
+        if self.state == STATE_READY:
+            self.state = STATE_INSPECT
+
+    def reset(self):
+        if self.state == STATE_FAIL:
+            self.state = STATE_READY
+            self.freeze_frame = None
+
+    # ---------------------
+    def loop(self):
+        ret, frame = self.cap.read()
+        if not ret: return
+
+        if self.state == STATE_FAIL and self.freeze_frame is not None:
+            self.show(self.freeze_frame)
+            return
+
+        display = cv2.resize(frame,(DISPLAY_W,DISPLAY_H))
+        self.show(display)
+
+        # SIMULATED SENSOR TRIGGER (replace with GPIO)
+        if self.state == STATE_READY:
+            if self.fake_sensor_edge():
+                self.trigger()
+
+        if self.state == STATE_INSPECT:
+            self.inspect(frame)
+
+    def inspect(self, frame):
+        # detection + color logic here (same as your pipeline)
+        # if fail:
+        #   self.state = STATE_FAIL
+        #   self.freeze_frame = frame.copy()
+        # else:
+        #   self.state = STATE_PASS
+        self.state = STATE_PASS
+        self.status.setText("PASS")
+        QtCore.QTimer.singleShot(700, lambda: setattr(self,'state',STATE_READY))
+
+    def fake_sensor_edge(self):
+        return False  # replace with real signal
+
+    def show(self, img):
+        rgb = cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+        qimg = QtGui.QImage(rgb.data,rgb.shape[1],rgb.shape[0],QtGui.QImage.Format_RGB888)
+        self.view.setPixmap(QtGui.QPixmap.fromImage(qimg))
+
+# =========================
+# MAIN
+# =========================
+if __name__=="__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    gui = SPEN()
+    gui.show()
+    sys.exit(app.exec_())
