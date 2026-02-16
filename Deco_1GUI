@@ -1,0 +1,182 @@
+# ==================================================
+# ALL-IN-ONE GUI + INSPECTION PIPELINE
+# ==================================================
+import sys
+import cv2
+import numpy as np
+from PyQt5 import QtWidgets, QtGui
+from ultralytics import YOLO
+
+# =========================
+# USER CONFIG
+# =========================
+DISPLAY_WIDTH  = 960
+DISPLAY_HEIGHT = 540
+DELTA_E_THRESHOLD = 8.0
+SHRINK_RATIO = 0.15
+
+# =========================
+# VISION FUNCTIONS
+# =========================
+def detect_boxes(model, frame_resized, scale_x, scale_y):
+    results = model(frame_resized, conf=0.5)[0]
+    boxes = []
+
+    for b in results.boxes:
+        cls = int(b.cls)
+        x1,y1,x2,y2 = map(int, b.xyxy[0])
+
+        # map back to original resolution
+        x1 = int(x1 * scale_x)
+        y1 = int(y1 * scale_y)
+        x2 = int(x2 * scale_x)
+        y2 = int(y2 * scale_y)
+
+        boxes.append((cls, x1, y1, x2, y2))
+
+    return boxes
+
+def inside(parent, child):
+    _,px1,py1,px2,py2 = parent
+    _,cx1,cy1,cx2,cy2 = child
+    return cx1>=px1 and cy1>=py1 and cx2<=px2 and cy2<=py2
+
+def shrink(box, ratio, W, H):
+    cls,x1,y1,x2,y2 = box
+    dx = int((x2-x1)*ratio)
+    dy = int((y2-y1)*ratio)
+    return (
+        cls,
+        max(0,x1+dx),
+        max(0,y1+dy),
+        min(W,x2-dx),
+        min(H,y2-dy)
+    )
+
+def preprocess(roi):
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (0,0,40), (180,255,255))
+    kernel = np.ones((3,3), np.uint8)
+    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+def extract_lab(img, box):
+    _,x1,y1,x2,y2 = box
+    roi = img[y1:y2, x1:x2]
+
+    if roi.size == 0:
+        return None
+
+    mask = preprocess(roi)
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+    pixels = lab[mask > 0]
+
+    if len(pixels) < 50:
+        return None
+
+    return np.median(pixels, axis=0)
+
+def delta_e(c1, c2):
+    return np.linalg.norm(c1 - c2)
+
+# =========================
+# GUI CLASS
+# =========================
+class Inspector(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Industrial Color Inspection")
+        self.resize(1100, 750)
+
+        self.image_label = QtWidgets.QLabel()
+        self.image_label.setFixedSize(DISPLAY_WIDTH, DISPLAY_HEIGHT)
+
+        self.status_label = QtWidgets.QLabel("WAIT")
+        self.status_label.setStyleSheet("font-size:32px;font-weight:bold")
+
+        load_btn = QtWidgets.QPushButton("Load Trained Model")
+        load_btn.clicked.connect(self.load_model)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.image_label)
+        layout.addWidget(self.status_label)
+        layout.addWidget(load_btn)
+
+        self.cap = cv2.VideoCapture(0)
+        self.timer = QtWidgets.QTimer()
+        self.timer.timeout.connect(self.update_frame)
+        self.timer.start(30)
+
+        self.model = None
+
+    def load_model(self):
+        path,_ = QtWidgets.QFileDialog.getOpenFileName(
+            self,"Load YOLO Model",".","*.pt"
+        )
+        if path:
+            self.model = YOLO(path)
+
+    def update_frame(self):
+        if self.model is None:
+            return
+
+        ret, frame = self.cap.read()
+        if not ret:
+            return
+
+        H, W = frame.shape[:2]
+
+        # resize for detection + display
+        frame_resized = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+        scale_x = W / DISPLAY_WIDTH
+        scale_y = H / DISPLAY_HEIGHT
+
+        boxes = detect_boxes(self.model, frame_resized, scale_x, scale_y)
+
+        roi = body = deco = None
+        for b in boxes:
+            if b[0] == 0: roi = b
+            elif b[0] == 1: body = b
+            elif b[0] == 2: deco = b
+
+        if roi and body and deco and inside(roi,body) and inside(roi,deco):
+            body = shrink(body, SHRINK_RATIO, W, H)
+            deco = shrink(deco, SHRINK_RATIO, W, H)
+
+            bc = extract_lab(frame, body)
+            dc = extract_lab(frame, deco)
+
+            if bc is not None and dc is not None:
+                de = delta_e(bc, dc)
+                if de < DELTA_E_THRESHOLD:
+                    self.status_label.setText(f"PASS   ΔE={de:.2f}")
+                    self.status_label.setStyleSheet("color:green;font-size:32px")
+                else:
+                    self.status_label.setText(f"FAIL   ΔE={de:.2f}")
+                    self.status_label.setStyleSheet("color:red;font-size:32px")
+
+        # draw boxes on display frame
+        for _,x1,y1,x2,y2 in boxes:
+            cv2.rectangle(
+                frame_resized,
+                (int(x1/scale_x), int(y1/scale_y)),
+                (int(x2/scale_x), int(y2/scale_y)),
+                (0,255,0), 2
+            )
+
+        rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+        qimg = QtGui.QImage(
+            rgb.data,
+            rgb.shape[1],
+            rgb.shape[0],
+            QtGui.QImage.Format_RGB888
+        )
+        self.image_label.setPixmap(QtGui.QPixmap.fromImage(qimg))
+
+# =========================
+# MAIN
+# =========================
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    gui = Inspector()
+    gui.show()
+    sys.exit(app.exec_())
