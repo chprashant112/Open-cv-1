@@ -1,0 +1,273 @@
+# ================= SAFETY HEADERS =================
+import os
+os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+os.environ["OPENCV_VIDEOIO_PRIORITY_DSHOW"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
+# ================= IMPORTS =================
+import sys
+import cv2
+import numpy as np
+import serial
+import serial.tools.list_ports
+from datetime import datetime
+from PyQt5 import QtWidgets, QtGui, QtCore
+
+# ================= CONFIG =================
+DELTA_E_THRESHOLD = 8.0
+MIN_VALID_PIXELS = 60
+
+# ================= COLOR =================
+def preprocess_roi(roi):
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    return cv2.inRange(hsv, (0, 0, 40), (180, 255, 255))
+
+def extract_lab(img, box):
+    _, x1, y1, x2, y2 = box
+    roi = img[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+    px = lab[preprocess_roi(roi) > 0]
+    if len(px) < MIN_VALID_PIXELS:
+        return None
+    return np.median(px, axis=0)
+
+# ================= MAIN WINDOW =================
+class DecoColorInspection(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("DECO–COLOR Inspection")
+        self.setFixedSize(1280, 800)
+
+        # ---- Runtime state ----
+        self.cap = None
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.camera_loop)
+
+        self.model = None
+        self.last_frame = None
+
+        self.arduino_trigger = None
+        self.arduino_output = None
+
+        self.build_ui()
+
+    # ================= UI =================
+    def build_ui(self):
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+
+        main_layout = QtWidgets.QHBoxLayout(central)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
+
+        # ========== LEFT PANEL ==========
+        left_panel = QtWidgets.QVBoxLayout()
+        left_panel.setSpacing(6)
+
+        self.image = QtWidgets.QLabel()
+        self.image.setStyleSheet("background:black;border:2px solid #444;")
+        self.image.setAlignment(QtCore.Qt.AlignCenter)
+        left_panel.addWidget(self.image, stretch=1)
+
+        self.status = QtWidgets.QLabel("WAITING")
+        self.status.setFixedHeight(60)
+        self.status.setAlignment(QtCore.Qt.AlignCenter)
+        self.status.setStyleSheet(
+            "font-size:32px;font-weight:bold;"
+            "background:#e0e0e0;border:2px solid #444;"
+        )
+        left_panel.addWidget(self.status)
+
+        self.table = QtWidgets.QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["#", "Time", "Result", "ΔE"])
+        self.table.setFixedHeight(140)
+        self.table.setStyleSheet("border:2px solid #444;")
+        left_panel.addWidget(self.table)
+
+        main_layout.addLayout(left_panel, stretch=4)
+
+        # ========== RIGHT PANEL ==========
+        right_panel = QtWidgets.QVBoxLayout()
+        right_panel.setSpacing(8)
+
+        # ---- Camera Control Box ----
+        cam_box = QtWidgets.QGroupBox("Camera & Model")
+        cam_layout = QtWidgets.QVBoxLayout(cam_box)
+        cam_layout.setSpacing(6)
+
+        self.btn_load = QtWidgets.QPushButton("Load Model")
+        self.btn_start_cam = QtWidgets.QPushButton("Start Camera")
+        self.btn_stop_cam = QtWidgets.QPushButton("Stop Camera")
+        self.btn_manual = QtWidgets.QPushButton("Manual Trigger")
+
+        self.btn_start_cam.setStyleSheet("background:#2e7d32;color:white;")
+        self.btn_stop_cam.setStyleSheet("background:#c62828;color:white;")
+        self.btn_manual.setStyleSheet("background:#ef6c00;color:white;")
+
+        for b in [self.btn_load, self.btn_start_cam, self.btn_stop_cam, self.btn_manual]:
+            b.setFixedHeight(36)
+            cam_layout.addWidget(b)
+
+        right_panel.addWidget(cam_box)
+
+        # ---- Arduino Control Box ----
+        ard_box = QtWidgets.QGroupBox("Arduino Control")
+        ard_layout = QtWidgets.QVBoxLayout(ard_box)
+        ard_layout.setSpacing(6)
+
+        ard_layout.addWidget(QtWidgets.QLabel("Trigger Arduino"))
+        self.combo_trig = QtWidgets.QComboBox()
+        self.btn_trig = QtWidgets.QPushButton("Connect")
+        self.btn_trig.setFixedHeight(32)
+        ard_layout.addWidget(self.combo_trig)
+        ard_layout.addWidget(self.btn_trig)
+
+        ard_layout.addSpacing(6)
+
+        ard_layout.addWidget(QtWidgets.QLabel("Output Arduino"))
+        self.combo_out = QtWidgets.QComboBox()
+        self.btn_out = QtWidgets.QPushButton("Connect")
+        self.btn_out.setFixedHeight(32)
+        ard_layout.addWidget(self.combo_out)
+        ard_layout.addWidget(self.btn_out)
+
+        right_panel.addWidget(ard_box)
+        right_panel.addStretch()
+
+        main_layout.addLayout(right_panel, stretch=1)
+
+        # ---- Signals ----
+        self.btn_load.clicked.connect(self.load_model)
+        self.btn_start_cam.clicked.connect(self.start_camera)
+        self.btn_stop_cam.clicked.connect(self.stop_camera)
+        self.btn_manual.clicked.connect(self.manual_trigger)
+        self.btn_trig.clicked.connect(self.connect_trigger)
+        self.btn_out.clicked.connect(self.connect_output)
+
+        self.refresh_ports()
+
+    # ================= CAMERA =================
+    def start_camera(self):
+        if self.cap is None:
+            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        if self.cap.isOpened():
+            self.timer.start(30)
+
+    def stop_camera(self):
+        self.timer.stop()
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+
+    def camera_loop(self):
+        if self.cap is None:
+            return
+        ret, frame = self.cap.read()
+        if not ret:
+            return
+        self.last_frame = frame.copy()
+        self.display(frame)
+
+    # ================= MANUAL TRIGGER =================
+    def manual_trigger(self):
+        if self.model is None or self.last_frame is None:
+            return
+        self.inspect(self.last_frame.copy())
+
+    # ================= INSPECTION =================
+    def inspect(self, frame):
+        res = self.model(frame, conf=0.5)[0]
+        body = deco = None
+
+        for b in res.boxes:
+            cls = int(b.cls)
+            x1, y1, x2, y2 = map(int, b.xyxy[0])
+            if cls == 1:
+                body = (cls, x1, y1, x2, y2)
+            elif cls == 2:
+                deco = (cls, x1, y1, x2, y2)
+
+        if not (body and deco):
+            self.set_result("FAIL", None)
+            return
+
+        bc = extract_lab(frame, body)
+        dc = extract_lab(frame, deco)
+        if bc is None or dc is None:
+            self.set_result("FAIL", None)
+            return
+
+        de = np.linalg.norm(bc - dc)
+        self.set_result("PASS" if de < DELTA_E_THRESHOLD else "FAIL", de)
+
+    # ================= RESULT =================
+    def set_result(self, result, de):
+        color = "#2e7d32" if result == "PASS" else "#c62828"
+        self.status.setText(result)
+        self.status.setStyleSheet(
+            f"background:{color};color:white;font-size:32px;font-weight:bold;"
+        )
+        self.log(result, de)
+
+    # ================= DISPLAY =================
+    def display(self, frame):
+        h, w, _ = frame.shape
+        lw, lh = self.image.width(), self.image.height()
+        scale = max(lw / w, lh / h)
+        resized = cv2.resize(frame, (int(w * scale), int(h * scale)))
+        y = (resized.shape[0] - lh) // 2
+        x = (resized.shape[1] - lw) // 2
+        crop = resized[y:y + lh, x:x + lw]
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        qimg = QtGui.QImage(rgb.data, lw, lh, QtGui.QImage.Format_RGB888)
+        self.image.setPixmap(QtGui.QPixmap.fromImage(qimg))
+
+    # ================= LOG =================
+    def log(self, res, de):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self.table.setItem(r, 0, QtWidgets.QTableWidgetItem(str(r + 1)))
+        self.table.setItem(r, 1, QtWidgets.QTableWidgetItem(
+            datetime.now().strftime("%H:%M:%S")))
+        self.table.setItem(r, 2, QtWidgets.QTableWidgetItem(res))
+        self.table.setItem(r, 3, QtWidgets.QTableWidgetItem(
+            "" if de is None else f"{de:.2f}"))
+
+    # ================= ARDUINO =================
+    def refresh_ports(self):
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        self.combo_trig.addItems(ports)
+        self.combo_out.addItems(ports)
+
+    def connect_trigger(self):
+        self.arduino_trigger = serial.Serial(
+            self.combo_trig.currentText(), 9600, timeout=0.1
+        )
+
+    def connect_output(self):
+        self.arduino_output = serial.Serial(
+            self.combo_out.currentText(), 9600, timeout=0.1
+        )
+
+    # ================= MODEL =================
+    def load_model(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Model", ".", "*.pt"
+        )
+        if path:
+            from ultralytics import YOLO
+            self.model = YOLO(path)
+            self.status.setText("READY")
+
+# ================= RUN =================
+def main():
+    app = QtWidgets.QApplication(sys.argv)
+    win = DecoColorInspection()
+    win.show()
+    sys.exit(app.exec_())
+
+if __name__ == "__main__":
+    main()
