@@ -1,0 +1,239 @@
+# ================= SAFETY =================
+import os
+os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+os.environ["OPENCV_VIDEOIO_PRIORITY_DSHOW"] = "1"
+
+# ================= IMPORTS =================
+import sys, cv2, numpy as np
+import serial, serial.tools.list_ports
+from datetime import datetime
+from PyQt5 import QtWidgets, QtGui, QtCore
+
+# ================= CONFIG =================
+DELTA_E_THRESHOLD = 8.0
+MIN_VALID_PIXELS = 60
+
+# ================= COLOR =================
+def preprocess_roi(roi):
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    # Masking to avoid pure black/shadows or highlights
+    return cv2.inRange(hsv, (0, 0, 40), (180, 255, 255))
+
+def extract_lab(img, box):
+    # box format: [cls, x1, y1, x2, y2]
+    _, x1, y1, x2, y2 = box
+    roi = img[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+    mask = preprocess_roi(roi)
+    px = lab[mask > 0]
+    if len(px) < MIN_VALID_PIXELS:
+        return None
+    return np.median(px, axis=0)
+
+# ================= CAMERA THREAD =================
+class CameraThread(QtCore.QThread):
+    frame_ready = QtCore.pyqtSignal(np.ndarray)
+
+    def __init__(self, cam_index=0):
+        super().__init__()
+        self.cam_index = cam_index
+        self.running = False
+
+    def run(self):
+        # Use CAP_DSHOW for faster startup on Windows
+        cap = cv2.VideoCapture(self.cam_index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            print("Error: Could not open camera.")
+            return
+
+        self.running = True
+        while self.running:
+            ret, frame = cap.read()
+            if ret:
+                self.frame_ready.emit(frame)
+            self.msleep(30) # ~30 FPS
+
+        cap.release()
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+# ================= MAIN WINDOW =================
+class DecoColorInspection(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("DECO–COLOR Inspection")
+        self.setFixedSize(1280, 800)
+
+        self.model = None
+        self.last_frame = None
+        self.cam_thread = None
+
+        self.build_ui()
+        self.refresh_ports()
+
+    def build_ui(self):
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        layout = QtWidgets.QHBoxLayout(central)
+
+        # ---- LEFT PANEL ----
+        left = QtWidgets.QVBoxLayout()
+        self.image = QtWidgets.QLabel()
+        self.image.setStyleSheet("background:black; border:2px solid #444;")
+        self.image.setAlignment(QtCore.Qt.AlignCenter) # Center the video
+        left.addWidget(self.image, 1)
+
+        self.status = QtWidgets.QLabel("WAITING")
+        self.status.setFixedHeight(60)
+        self.status.setAlignment(QtCore.Qt.AlignCenter)
+        self.status.setStyleSheet("font-size:32px; font-weight:bold; background:#e0e0e0; border:2px solid #444;")
+        left.addWidget(self.status)
+
+        self.table = QtWidgets.QTableWidget(0,4)
+        self.table.setHorizontalHeaderLabels(["#", "Time", "Result", "ΔE"])
+        self.table.setFixedHeight(140)
+        left.addWidget(self.table)
+        layout.addLayout(left, 4)
+
+        # ---- RIGHT PANEL ----
+        right = QtWidgets.QVBoxLayout()
+        self.btn_start_cam = QtWidgets.QPushButton("Start Camera")
+        self.btn_stop_cam = QtWidgets.QPushButton("Stop Camera")
+        self.btn_manual = QtWidgets.QPushButton("Manual Trigger")
+        self.btn_load = QtWidgets.QPushButton("Load Model")
+
+        self.btn_start_cam.setStyleSheet("background:#2e7d32; color:white")
+        self.btn_stop_cam.setStyleSheet("background:#c62828; color:white")
+        self.btn_manual.setStyleSheet("background:#ef6c00; color:white")
+
+        for b in [self.btn_load, self.btn_start_cam, self.btn_stop_cam, self.btn_manual]:
+            b.setFixedHeight(36)
+            right.addWidget(b)
+
+        right.addSpacing(10)
+        self.combo_trig = QtWidgets.QComboBox()
+        self.combo_out = QtWidgets.QComboBox()
+        right.addWidget(QtWidgets.QLabel("Trigger Arduino"))
+        right.addWidget(self.combo_trig)
+        right.addWidget(QtWidgets.QLabel("Output Arduino"))
+        right.addWidget(self.combo_out)
+        right.addStretch()
+        layout.addLayout(right, 1)
+
+        # SIGNALS
+        self.btn_start_cam.clicked.connect(self.start_camera)
+        self.btn_stop_cam.clicked.connect(self.stop_camera)
+        self.btn_manual.clicked.connect(self.manual_trigger)
+        self.btn_load.clicked.connect(self.load_model)
+
+    def start_camera(self):
+        if self.cam_thread is None or not self.cam_thread.isRunning():
+            self.cam_thread = CameraThread(0)
+            self.cam_thread.frame_ready.connect(self.on_frame)
+            self.cam_thread.start()
+
+    def stop_camera(self):
+        if self.cam_thread:
+            self.cam_thread.stop()
+            self.image.clear()
+
+    def on_frame(self, frame):
+        self.last_frame = frame.copy()
+        self.display(frame)
+
+    def display(self, frame):
+        # Convert BGR to RGB
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bytes_per_line = ch * w
+        
+        # Create QImage from the frame
+        qimg = QtGui.QImage(rgb.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
+        
+        # Scale to fit the label while keeping aspect ratio
+        pixmap = QtGui.QPixmap.fromImage(qimg)
+        self.image.setPixmap(pixmap.scaled(
+            self.image.size(), 
+            QtCore.Qt.KeepAspectRatio, 
+            QtCore.Qt.SmoothTransformation
+        ))
+
+    def manual_trigger(self):
+        if self.model is None:
+            QtWidgets.QMessageBox.warning(self, "Error", "Please load a YOLO model (.pt) first.")
+            return
+        if self.last_frame is not None:
+            self.inspect(self.last_frame.copy())
+
+    def inspect(self, frame):
+        # res.boxes is an object, result classes are integers
+        results = self.model(frame, conf=0.5)[0]
+        body = deco = None
+
+        for b in results.boxes:
+            cls = int(b.cls[0])
+            coords = b.xyxy[0].cpu().numpy().astype(int)
+            x1, y1, x2, y2 = coords
+            
+            # Assuming Class 0=Body, Class 1=Deco (Adjust based on your YAML)
+            if cls == 0: body = (cls, x1, y1, x2, y2)
+            elif cls == 1: deco = (cls, x1, y1, x2, y2)
+
+        if not body or not deco:
+            self.set_result("FAIL (Not Found)", None)
+            return
+
+        bc = extract_lab(frame, body)
+        dc = extract_lab(frame, deco)
+        
+        if bc is None or dc is None:
+            self.set_result("FAIL (No Pixels)", None)
+            return
+
+        # Calculate Delta E (Simple Euclidean distance in LAB space)
+        de = np.linalg.norm(bc - dc)
+        status = "PASS" if de < DELTA_E_THRESHOLD else "FAIL (Color)"
+        self.set_result(status, de)
+
+    def set_result(self, res, de):
+        self.status.setText(res)
+        color = "#2e7d32" if "PASS" in res else "#c62828"
+        self.status.setStyleSheet(f"font-size:32px; font-weight:bold; color:white; background:{color};")
+        self.log(res, de)
+
+    def log(self, res, de):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self.table.setItem(r,0,QtWidgets.QTableWidgetItem(str(r+1)))
+        self.table.setItem(r,1,QtWidgets.QTableWidgetItem(datetime.now().strftime("%H:%M:%S")))
+        self.table.setItem(r,2,QtWidgets.QTableWidgetItem(res))
+        val = f"{de:.2f}" if de is not None else "N/A"
+        self.table.setItem(r,3,QtWidgets.QTableWidgetItem(val))
+        self.table.scrollToBottom()
+
+    def refresh_ports(self):
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        self.combo_trig.clear()
+        self.combo_out.clear()
+        self.combo_trig.addItems(ports)
+        self.combo_out.addItems(ports)
+
+    def load_model(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load YOLO Model", "", "PyTorch (*.pt)")
+        if path:
+            from ultralytics import YOLO
+            self.model = YOLO(path)
+            QtWidgets.QMessageBox.information(self, "Success", "Model Loaded.")
+
+def main():
+    app = QtWidgets.QApplication(sys.argv)
+    win = DecoColorInspection()
+    win.show()
+    sys.exit(app.exec_())
+
+if __name__ == "__main__":
+    main()
