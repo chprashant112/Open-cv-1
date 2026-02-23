@@ -1,0 +1,31 @@
+from ultralytics import YOLO
+import torch
+import os
+
+# Path to the data.yaml we just created
+YAML_PATH = r"C:\Users\91721\Desktop\deco_dataset_final\data.yaml"
+
+def start_training():
+    # 1. Load the base YOLOv8 Nano model
+    model = YOLO("yolov8n.pt")
+
+    # 2. Train
+    # workers=0 is critical for Windows Jupyter stability
+    # imgsz=640 is standard, batch=4 avoids memory crashes
+    results = model.train(
+        data=YAML_PATH,
+        epochs=100,        # You can lower this to 30 for a quick test
+        imgsz=640,
+        batch=4,
+        workers=0,
+        device=0 if torch.cuda.is_available() else "cpu",
+        project="DECO_INSPECTION",
+        name="color_v1_experiment",
+        exist_ok=True
+    )
+    
+    print("Training Complete!")
+    print(f"Best model saved at: DECO_INSPECTION/color_v1_experiment/weights/best.pt")
+
+if __name__ == "__main__":
+    start_training()
