@@ -1,0 +1,42 @@
+import cv2
+import numpy as np
+from ultralytics import YOLO
+import matplotlib.pyplot as plt
+
+# 1. Load your best model
+MODEL_PATH = r"DECO_INSPECTION/color_v1_experiment/weights/best.pt"
+model = YOLO(MODEL_PATH)
+
+# 2. Pick a test image
+img_path = r"C:\Users\91721\Desktop\deco_dataset_final\images\val"
+sample_file = os.path.join(img_path, os.listdir(img_path)[0])
+frame = cv2.imread(sample_file)
+
+# 3. Run Inference
+results = model(frame)[0]
+
+# Create a copy for the mask visualization
+mask_viz = np.zeros_like(frame)
+
+for box in results.boxes:
+    x1, y1, x2, y2 = map(int, box.xyxy[0])
+    roi = frame[y1:y2, x1:x2]
+    
+    # Apply the LAB/HSV color thresholding used in your GUI
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (0, 0, 40), (180, 255, 255))
+    
+    # Put the mask back into the visualization frame
+    mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    mask_viz[y1:y2, x1:x2] = mask_bgr
+
+# 4. Combine for a "Pro" Presentation View
+yolo_output = results.plot() # Standard YOLO box view
+combined = np.hstack((yolo_output, mask_viz)) # Side-by-side
+
+# 5. Display
+plt.figure(figsize=(15, 7))
+plt.imshow(cv2.cvtColor(combined, cv2.COLOR_BGR2RGB))
+plt.title("AI Detection (Left) vs. Color Segmentation Logic (Right)", fontsize=16)
+plt.axis('off')
+plt.show()
