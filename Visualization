@@ -1,0 +1,23 @@
+from ultralytics import YOLO
+import cv2
+from matplotlib import pyplot as plt
+
+# Load your newly trained model
+model_path = r"DECO_INSPECTION/color_v1_experiment/weights/best.pt"
+if os.path.exists(model_path):
+    model = YOLO(model_path)
+
+    # Run prediction on one image from your validation set
+    # Replace 'test.jpg' with a real filename from your val folder
+    test_img = r"C:\Users\91721\Desktop\deco_dataset_final\images\val"
+    first_img = os.path.join(test_img, os.listdir(test_img)[0])
+    
+    results = model(first_img)
+    
+    # Plot the results
+    res_plotted = results[0].plot()
+    plt.imshow(cv2.cvtColor(res_plotted, cv2.COLOR_BGR2RGB))
+    plt.axis('off')
+    plt.show()
+else:
+    print("Model not found. Did the training finish?")
